@@ -1,0 +1,528 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "
+  Highly Available Auto-Scaling Web Tier with ALB.
+  Deploys VPC, public/private subnets, NAT Gateway, Application Load Balancer,
+  Auto Scaling Group, and Apache-based EC2 instances.
+  All backend instances are in private subnets with no direct inbound internet access."
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: AutoScaleDemo
+    Description: Environment name prefixed to all resource names
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR for public subnet in AZ-1 (ALB)
+
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR for public subnet in AZ-2 (ALB)
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: CIDR for private subnet in AZ-1 (EC2)
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.12.0/24
+    Description: CIDR for private subnet in AZ-2 (EC2)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: EC2 instance type for the web tier
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: 'ami-0f61de2873e29e866'
+    Description: 'Amazon Linux 2 AMI'
+
+  ASGMinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances in the ASG
+
+  ASGDesiredSize:
+    Type: Number
+    Default: 1
+    Description: Desired number of instances in the ASG
+
+  ASGMaxSize:
+    Type: Number
+    Default: 4
+    Description: Maximum number of instances in the ASG
+
+  CPUScaleOutThreshold:
+    Type: Number
+    Default: 30
+    Description: CPU utilization (%) that triggers a scale-out event
+
+Resources:
+
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicSubnet-AZ1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicSubnet-AZ2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateSubnet-AZ1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateSubnet-AZ2
+
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NatGateway-EIP
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NatGateway
+
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicRT
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateRT
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-ALB-SG
+      GroupDescription: Allows inbound HTTP from the public internet to the ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from internet
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ALB-SG
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-EC2-SG
+      GroupDescription: >
+        Allows inbound HTTP only from the ALB security group.
+        No direct internet access. No SSH allowed.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB only
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-EC2-SG
+
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-ALB
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ALB
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-TG
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      LoadBalancingAlgorithmType: round_robin
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-TG
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-EC2-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-EC2-Role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${EnvironmentName}-EC2-Profile
+      Roles:
+        - !Ref EC2InstanceRole
+
+
+  WebServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-LaunchTemplate
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+
+            dnf update -y
+            dnf install -y httpd
+
+            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+              -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+              http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+              http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+              http://169.254.169.254/latest/meta-data/local-ipv4)
+            LAUNCH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            cat > /var/www/html/index.html << HTML
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>AutoScale Demo | ${EnvironmentName}</title>
+              <style>
+                * { box-sizing: border-box; margin: 0; padding: 0; }
+                body {
+                  font-family: 'Segoe UI', Arial, sans-serif;
+                  background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+                  min-height: 100vh;
+                  display: flex; align-items: center; justify-content: center;
+                  color: #fff;
+                }
+                .card {
+                  background: rgba(255,255,255,0.08);
+                  border: 1px solid rgba(255,255,255,0.15);
+                  border-radius: 16px;
+                  padding: 40px 50px;
+                  max-width: 600px;
+                  width: 90%;
+                  backdrop-filter: blur(10px);
+                  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+                }
+                h1 { font-size: 1.8rem; margin-bottom: 8px; color: #7ec8e3; }
+                .subtitle { color: #aaa; margin-bottom: 32px; font-size: 0.95rem; }
+                .metric {
+                  display: flex; justify-content: space-between; align-items: center;
+                  padding: 14px 0;
+                  border-bottom: 1px solid rgba(255,255,255,0.08);
+                }
+                .metric:last-child { border-bottom: none; }
+                .label { color: #aaa; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+                .value { font-size: 1.1rem; font-weight: 600; color: #fff; font-family: monospace; }
+                .instance-id { color: #7ec8e3; }
+                .badge {
+                  display: inline-block;
+                  background: rgba(46, 213, 115, 0.2);
+                  color: #2ed573;
+                  border: 1px solid #2ed573;
+                  border-radius: 20px;
+                  padding: 4px 14px;
+                  font-size: 0.8rem;
+                  margin-top: 24px;
+                }
+                .env-name { color: #ffd32a; font-weight: bold; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                <h1>Auto-Scaling Web Tier</h1>
+                <p class="subtitle">Environment: <span class="env-name">${EnvironmentName}</span> &mdash; Served by a healthy backend instance</p>
+
+                <div class="metric">
+                  <span class="label">Instance ID</span>
+                  <span class="value instance-id">$INSTANCE_ID</span>
+                </div>
+                <div class="metric">
+                  <span class="label">Availability Zone</span>
+                  <span class="value">$AZ</span>
+                </div>
+                <div class="metric">
+                  <span class="label">Private IP</span>
+                  <span class="value">$PRIVATE_IP</span>
+                </div>
+                <div class="metric">
+                  <span class="label">Instance Launch Time</span>
+                  <span class="value">$LAUNCH_TIME</span>
+                </div>
+                <div class="metric">
+                  <span class="label">Web Server</span>
+                  <span class="value">Apache HTTP Server (httpd)</span>
+                </div>
+
+                <div class="badge">&#10003; Healthy &mdash; Load Balanced</div>
+              </div>
+            </body>
+            </html>
+            HTML
+
+            systemctl enable httpd
+            systemctl start httpd
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${EnvironmentName}-WebServer
+              - Key: Environment
+                Value: !Ref EnvironmentName
+
+
+  WebServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - DefaultPrivateRoute
+      - NatGateway
+    Properties:
+      AutoScalingGroupName: !Sub ${EnvironmentName}-ASG
+      MinSize: !Ref ASGMinSize
+      DesiredCapacity: !Ref ASGDesiredSize
+      MaxSize: !Ref ASGMaxSize
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebServerLaunchTemplate
+        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebServer
+          PropagateAtLaunch: true
+
+
+  CPUScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebServerASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref CPUScaleOutThreshold
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+
+Outputs:
+  ALBURL:
+    Description: Public DNS endpoint for the Application Load Balancer
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBURL
+
+  ALBArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBArn
+
+  TargetGroupArn:
+    Description: ARN of the ALB Target Group
+    Value: !Ref ALBTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-TargetGroupArn
+
+  ASGName:
+    Description: Name of the Auto Scaling Group
+    Value: !Ref WebServerASG
+    Export:
+      Name: !Sub ${EnvironmentName}-ASGName
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${EnvironmentName}-VpcId
+
+  PrivateSubnetIds:
+    Description: Comma-separated list of private subnet IDs
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnetIds
+
+  NatGatewayIP:
+    Description: Elastic IP of the NAT Gateway (outbound internet for private instances)
+    Value: !Ref NatGatewayEIP
+    Export:
+      Name: !Sub ${EnvironmentName}-NatGatewayEIP

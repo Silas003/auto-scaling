@@ -1,0 +1,4 @@
+template-path: templates/resources.yml
+
+stack-name: auto-scaling-demo
+
