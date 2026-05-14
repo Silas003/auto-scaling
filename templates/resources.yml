@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: "
   Highly Available Auto-Scaling Web Tier with ALB.
-  Deploys VPC, public/private subnets, NAT Gateway, Application Load Balancer,
-  Auto Scaling Group, and Apache-based EC2 instances.
+  Deploys VPC, public/private subnets, dual NAT Gateways (one per AZ for full HA),
+  Application Load Balancer, Auto Scaling Group, and Apache-based EC2 instances.
   All backend instances are in private subnets with no direct inbound internet access."
 
 Parameters:
@@ -19,12 +19,12 @@ Parameters:
   PublicSubnet1CIDR:
     Type: String
     Default: 10.0.1.0/24
-    Description: CIDR for public subnet in AZ-1 (ALB)
+    Description: CIDR for public subnet in AZ-1 (ALB + NAT GW)
 
   PublicSubnet2CIDR:
     Type: String
     Default: 10.0.2.0/24
-    Description: CIDR for public subnet in AZ-2 (ALB)
+    Description: CIDR for public subnet in AZ-2 (ALB + NAT GW)
 
   PrivateSubnet1CIDR:
     Type: String
@@ -139,23 +139,43 @@ Resources:
           Value: !Sub ${EnvironmentName}-PrivateSubnet-AZ2
 
 
-  NatGatewayEIP:
+
+  NatGatewayAZ1EIP:
     Type: AWS::EC2::EIP
     DependsOn: InternetGatewayAttachment
     Properties:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway-EIP
+          Value: !Sub ${EnvironmentName}-NatGateway-EIP-AZ1
 
-  NatGateway:
+  NatGatewayAZ2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NatGateway-EIP-AZ2
+
+  NatGatewayAZ1:
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      AllocationId: !GetAtt NatGatewayAZ1EIP.AllocationId
       SubnetId: !Ref PublicSubnet1
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway
+          Value: !Sub ${EnvironmentName}-NatGateway-AZ1
+
+  NatGatewayAZ2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAZ2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2    # BUG 1 FIX: was PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NatGateway-AZ2
+
 
 
   PublicRouteTable:
@@ -186,32 +206,47 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  PrivateRouteTable:
+  PrivateRouteTableA1:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-PrivateRT
+          Value: !Sub ${EnvironmentName}-PrivateRT-AZ1
 
-  DefaultPrivateRoute:
+  PrivateRouteTableA2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateRT-AZ2
+
+  DefaultPrivateRouteAZ1:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA1
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway
+      NatGatewayId: !Ref NatGatewayAZ1
+
+  DefaultPrivateRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayAZ2
 
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA1
 
   PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA2
 
 
   ALBSecurityGroup:
@@ -234,9 +269,9 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub ${EnvironmentName}-EC2-SG
-      GroupDescription: >
+      GroupDescription: "
         Allows inbound HTTP only from the ALB security group.
-        No direct internet access. No SSH allowed.
+        No direct internet access. No SSH allowed."
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -247,6 +282,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-SG
+
 
 
   ApplicationLoadBalancer:
@@ -443,12 +479,13 @@ Resources:
               - Key: Environment
                 Value: !Ref EnvironmentName
 
-
   WebServerASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn:
-      - DefaultPrivateRoute
-      - NatGateway
+      - DefaultPrivateRouteAZ1
+      - DefaultPrivateRouteAZ2
+      - NatGatewayAZ1
+      - NatGatewayAZ2
     Properties:
       AutoScalingGroupName: !Sub ${EnvironmentName}-ASG
       MinSize: !Ref ASGMinSize
@@ -479,8 +516,6 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ASGAverageCPUUtilization
         TargetValue: !Ref CPUScaleOutThreshold
-        ScaleInCooldown: 300
-        ScaleOutCooldown: 60
 
 
 Outputs:
@@ -520,8 +555,15 @@ Outputs:
     Export:
       Name: !Sub ${EnvironmentName}-PrivateSubnetIds
 
-  NatGatewayIP:
-    Description: Elastic IP of the NAT Gateway (outbound internet for private instances)
-    Value: !Ref NatGatewayEIP
+
+  NatGatewayAZ1IP:
+    Description: Elastic IP of the NAT Gateway in AZ-1
+    Value: !Ref NatGatewayAZ1EIP
     Export:
-      Name: !Sub ${EnvironmentName}-NatGatewayEIP
+      Name: !Sub ${EnvironmentName}-NatGatewayEIP-AZ1
+
+  NatGatewayAZ2IP:
+    Description: Elastic IP of the NAT Gateway in AZ-2
+    Value: !Ref NatGatewayAZ2EIP
+    Export:
+      Name: !Sub ${EnvironmentName}-NatGatewayEIP-AZ2
