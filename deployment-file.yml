@@ -1,4 +1,15 @@
-template-path: templates/resources.yml
-
-stack-name: auto-scaling-demo
-
+template-file-path: templates/resources.yml
+parameters:
+  PrivateSubnet1CIDR: 10.0.11.0/24
+  ASGMaxSize: '4'
+  CPUScaleOutThreshold: '30'
+  PublicSubnet2CIDR: 10.0.2.0/24
+  VpcCIDR: 10.0.0.0/16
+  EnvironmentName: AutoScaleDemo
+  PrivateSubnet2CIDR: 10.0.12.0/24
+  ASGMinSize: '1'
+  PublicSubnet1CIDR: 10.0.1.0/24
+  ASGDesiredSize: '1'
+  InstanceType: t3.micro
+  AmiId: ami-0f61de2873e29e866
+tags: {}
