@@ -171,7 +171,7 @@ Resources:
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatGatewayAZ2EIP.AllocationId
-      SubnetId: !Ref PublicSubnet2    # BUG 1 FIX: was PublicSubnet1
+      SubnetId: !Ref PublicSubnet2
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-NatGateway-AZ2
@@ -225,14 +225,14 @@ Resources:
   DefaultPrivateRouteAZ1:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTableA1
+      RouteTableId: !Ref PrivateRouteTableA1    # BUG 2 FIX: was !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGatewayAZ1
 
   DefaultPrivateRouteAZ2:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTableA2
+      RouteTableId: !Ref PrivateRouteTableA2    # BUG 2 FIX: was !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGatewayAZ2
 
@@ -240,14 +240,15 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTableA1
+      RouteTableId: !Ref PrivateRouteTableA1    # BUG 3 FIX: was !Ref PrivateRouteTable
 
   PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
-      RouteTableId: !Ref PrivateRouteTableA2
+      RouteTableId: !Ref PrivateRouteTableA2    # BUG 3 FIX: was !Ref PrivateRouteTable
 
+  # ── Security Groups ────────────────────────────────────────────────────────
 
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -283,7 +284,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-SG
 
-
+  # ── Application Load Balancer ──────────────────────────────────────────────
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -328,6 +329,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ALBTargetGroup
 
+  # ── IAM ────────────────────────────────────────────────────────────────────
 
   EC2InstanceRole:
     Type: AWS::IAM::Role
@@ -353,6 +355,7 @@ Resources:
       Roles:
         - !Ref EC2InstanceRole
 
+  # ── Launch Template & ASG ──────────────────────────────────────────────────
 
   WebServerLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -372,13 +375,13 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             set -euxo pipefail
-            
+
             dnf update -y
             dnf install -y httpd stress
-            
+
             # Enable CGI so Apache can execute the /stress endpoint
             mkdir -p /var/www/cgi-bin
-            
+
             cat >> /etc/httpd/conf/httpd.conf << 'APACHECONF'
             ScriptAlias /stress /var/www/cgi-bin/stress.sh
             <Directory "/var/www/cgi-bin">
@@ -388,7 +391,7 @@ Resources:
                 Require all granted
             </Directory>
             APACHECONF
-            
+
             # CGI script — runs stress across all vCPUs for 120 seconds in the background
             # then returns an immediate JSON response so the browser does not hang
             NCPU=$(nproc)
@@ -401,7 +404,7 @@ Resources:
             echo '{"status":"started","cpus":'"$NCPU"',"duration":120}'
             CGISCRIPT
             chmod +x /var/www/cgi-bin/stress.sh
-            
+
             # Collect instance metadata (IMDSv2)
             TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
               -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
@@ -412,7 +415,7 @@ Resources:
             PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
               http://169.254.169.254/latest/meta-data/local-ipv4)
             LAUNCH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            
+
             cat > /var/www/html/index.html << HTML
             <!DOCTYPE html>
             <html lang="en">
@@ -510,7 +513,7 @@ Resources:
               <div class="card">
                 <h1>Auto-Scaling Web Tier</h1>
                 <p class="subtitle">Environment: <span class="env-name">${EnvironmentName}</span> &mdash; Served by a healthy backend instance</p>
-            
+
                 <div class="metric">
                   <span class="label">Instance ID</span>
                   <span class="value instance-id">$INSTANCE_ID</span>
@@ -531,9 +534,9 @@ Resources:
                   <span class="label">Web Server</span>
                   <span class="value">Apache HTTP Server (httpd)</span>
                 </div>
-            
+
                 <div class="badge">&#10003; Healthy &mdash; Load Balanced</div>
-            
+
                 <!-- ── CPU Stress Demo ───────────────────────────────────── -->
                 <div class="stress-section">
                   <h2>&#9889; Scale-Out Demo</h2>
@@ -544,24 +547,24 @@ Resources:
                   <div class="countdown" id="countdown"></div>
                 </div>
               </div>
-            
+
               <script>
                 function triggerStress() {
                   const btn      = document.getElementById('stressBtn');
                   const status   = document.getElementById('stress-status');
                   const countdown = document.getElementById('countdown');
-            
+
                   btn.disabled   = true;
                   btn.textContent = 'Stressing CPU\u2026';
                   status.className = 'status-running';
                   status.textContent = '\u23F3 CPU stress running on this instance \u2014 watch CloudWatch for scale-out\u2026';
-            
+
                   fetch('/stress')
                     .then(r => r.json())
                     .then(data => {
                       const duration = data.duration || 120;
                       let remaining  = duration;
-            
+
                       const tick = setInterval(() => {
                         remaining--;
                         countdown.textContent = remaining + 's remaining';
@@ -586,26 +589,27 @@ Resources:
             </body>
             </html>
             HTML
-            
+
             systemctl enable httpd
             systemctl start httpd
 
-          TagSpecifications:
-            - ResourceType: instance
-              Tags:
-                - Key: Name
-                  Value: !Sub ${EnvironmentName}-WebServer
-                - Key: Environment
-                  Value: !Ref EnvironmentName
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${EnvironmentName}-WebServer
+              - Key: Environment
+                Value: !Ref EnvironmentName
 
-
+  # BUG 4 FIX: DependsOn referenced "DefaultPrivateRoute" and "NatGateway"
+  # which are not defined in this template. Updated to the correct logical IDs.
   WebServerASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn:
-      - DefaultPrivateRouteAZ1
-      - DefaultPrivateRouteAZ2
-      - NatGatewayAZ1
-      - NatGatewayAZ2
+      - DefaultPrivateRouteAZ1    # BUG 4 FIX: was DefaultPrivateRoute
+      - DefaultPrivateRouteAZ2    # BUG 4 FIX: was missing
+      - NatGatewayAZ1             # BUG 4 FIX: was NatGateway
+      - NatGatewayAZ2             # BUG 4 FIX: was missing
     Properties:
       AutoScalingGroupName: !Sub ${EnvironmentName}-ASG
       MinSize: !Ref ASGMinSize
@@ -626,6 +630,7 @@ Resources:
           Value: !Sub ${EnvironmentName}-WebServer
           PropagateAtLaunch: true
 
+  # ── Scaling Policy ─────────────────────────────────────────────────────────
 
   CPUScaleOutPolicy:
     Type: AWS::AutoScaling::ScalingPolicy
@@ -637,6 +642,7 @@ Resources:
           PredefinedMetricType: ASGAverageCPUUtilization
         TargetValue: !Ref CPUScaleOutThreshold
 
+# ── Outputs ───────────────────────────────────────────────────────────────────
 
 Outputs:
   ALBURL:
