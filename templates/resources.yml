@@ -372,10 +372,37 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             set -euxo pipefail
-
+            
             dnf update -y
-            dnf install -y httpd
-
+            dnf install -y httpd stress
+            
+            # Enable CGI so Apache can execute the /stress endpoint
+            mkdir -p /var/www/cgi-bin
+            
+            cat >> /etc/httpd/conf/httpd.conf << 'APACHECONF'
+            ScriptAlias /stress /var/www/cgi-bin/stress.sh
+            <Directory "/var/www/cgi-bin">
+                AllowOverride None
+                Options +ExecCGI
+                AddHandler cgi-script .sh
+                Require all granted
+            </Directory>
+            APACHECONF
+            
+            # CGI script — runs stress across all vCPUs for 120 seconds in the background
+            # then returns an immediate JSON response so the browser does not hang
+            NCPU=$(nproc)
+            cat > /var/www/cgi-bin/stress.sh << CGISCRIPT
+            #!/bin/bash
+            echo "Content-Type: application/json"
+            echo ""
+            # Fire stress in the background so Apache can return immediately
+            nohup stress --cpu $NCPU --timeout 120 > /dev/null 2>&1 &
+            echo '{"status":"started","cpus":'"$NCPU"',"duration":120}'
+            CGISCRIPT
+            chmod +x /var/www/cgi-bin/stress.sh
+            
+            # Collect instance metadata (IMDSv2)
             TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
               -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
             INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
@@ -385,7 +412,7 @@ Resources:
             PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
               http://169.254.169.254/latest/meta-data/local-ipv4)
             LAUNCH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
+            
             cat > /var/www/html/index.html << HTML
             <!DOCTYPE html>
             <html lang="en">
@@ -434,13 +461,56 @@ Resources:
                   margin-top: 24px;
                 }
                 .env-name { color: #ffd32a; font-weight: bold; }
+                .stress-section {
+                  margin-top: 32px;
+                  padding-top: 24px;
+                  border-top: 1px solid rgba(255,255,255,0.12);
+                }
+                .stress-section h2 {
+                  font-size: 1rem;
+                  color: #aaa;
+                  text-transform: uppercase;
+                  letter-spacing: 0.05em;
+                  margin-bottom: 12px;
+                }
+                .btn-stress {
+                  width: 100%;
+                  padding: 14px;
+                  border: none;
+                  border-radius: 10px;
+                  background: linear-gradient(135deg, #e84393, #c0392b);
+                  color: #fff;
+                  font-size: 1rem;
+                  font-weight: 700;
+                  cursor: pointer;
+                  letter-spacing: 0.03em;
+                  transition: opacity 0.2s, transform 0.1s;
+                }
+                .btn-stress:hover  { opacity: 0.88; }
+                .btn-stress:active { transform: scale(0.98); }
+                .btn-stress:disabled { opacity: 0.5; cursor: not-allowed; }
+                #stress-status {
+                  margin-top: 12px;
+                  font-size: 0.88rem;
+                  min-height: 20px;
+                  text-align: center;
+                }
+                .status-running { color: #ffd32a; }
+                .status-done    { color: #2ed573; }
+                .status-error   { color: #ff4757; }
+                .countdown {
+                  font-size: 0.8rem;
+                  color: #aaa;
+                  text-align: center;
+                  margin-top: 6px;
+                }
               </style>
             </head>
             <body>
               <div class="card">
                 <h1>Auto-Scaling Web Tier</h1>
                 <p class="subtitle">Environment: <span class="env-name">${EnvironmentName}</span> &mdash; Served by a healthy backend instance</p>
-
+            
                 <div class="metric">
                   <span class="label">Instance ID</span>
                   <span class="value instance-id">$INSTANCE_ID</span>
@@ -461,23 +531,73 @@ Resources:
                   <span class="label">Web Server</span>
                   <span class="value">Apache HTTP Server (httpd)</span>
                 </div>
-
+            
                 <div class="badge">&#10003; Healthy &mdash; Load Balanced</div>
+            
+                <!-- ── CPU Stress Demo ───────────────────────────────────── -->
+                <div class="stress-section">
+                  <h2>&#9889; Scale-Out Demo</h2>
+                  <button class="btn-stress" id="stressBtn" onclick="triggerStress()">
+                    &#128293; Trigger CPU Spike (120 s)
+                  </button>
+                  <div id="stress-status"></div>
+                  <div class="countdown" id="countdown"></div>
+                </div>
               </div>
+            
+              <script>
+                function triggerStress() {
+                  const btn      = document.getElementById('stressBtn');
+                  const status   = document.getElementById('stress-status');
+                  const countdown = document.getElementById('countdown');
+            
+                  btn.disabled   = true;
+                  btn.textContent = 'Stressing CPU\u2026';
+                  status.className = 'status-running';
+                  status.textContent = '\u23F3 CPU stress running on this instance \u2014 watch CloudWatch for scale-out\u2026';
+            
+                  fetch('/stress')
+                    .then(r => r.json())
+                    .then(data => {
+                      const duration = data.duration || 120;
+                      let remaining  = duration;
+            
+                      const tick = setInterval(() => {
+                        remaining--;
+                        countdown.textContent = remaining + 's remaining';
+                        if (remaining <= 0) {
+                          clearInterval(tick);
+                          countdown.textContent = '';
+                          status.className = 'status-done';
+                          status.textContent = '\u2705 Stress complete. New instances may already be joining the target group.';
+                          btn.disabled    = false;
+                          btn.textContent = '\uD83D\uDD25 Trigger CPU Spike (120 s)';
+                        }
+                      }, 1000);
+                    })
+                    .catch(() => {
+                      status.className = 'status-error';
+                      status.textContent = '\u274C Request failed \u2014 try refreshing the page.';
+                      btn.disabled    = false;
+                      btn.textContent = '\uD83D\uDD25 Trigger CPU Spike (120 s)';
+                    });
+                }
+              </script>
             </body>
             </html>
             HTML
-
+            
             systemctl enable httpd
             systemctl start httpd
 
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: Name
-                Value: !Sub ${EnvironmentName}-WebServer
-              - Key: Environment
-                Value: !Ref EnvironmentName
+          TagSpecifications:
+            - ResourceType: instance
+              Tags:
+                - Key: Name
+                  Value: !Sub ${EnvironmentName}-WebServer
+                - Key: Environment
+                  Value: !Ref EnvironmentName
+
 
   WebServerASG:
     Type: AWS::AutoScaling::AutoScalingGroup
