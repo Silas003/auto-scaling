@@ -345,7 +345,6 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
 
-            dnf update -y
             dnf install -y httpd stress
 
             # Enable CGI so Apache can execute the /stress endpoint
@@ -591,7 +590,7 @@ Resources:
       TargetGroupARNs:
         - !Ref ALBTargetGroup
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 20
+      HealthCheckGracePeriod: 180
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-WebServer
