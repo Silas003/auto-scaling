@@ -140,43 +140,15 @@ Resources:
 
 
 
-  NatGatewayAZ1EIP:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway-EIP-AZ1
-
-  NatGatewayAZ2EIP:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway-EIP-AZ2
-
-  NatGatewayAZ1:
+  RegionalNatGateway:
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt NatGatewayAZ1EIP.AllocationId
-      SubnetId: !Ref PublicSubnet1
+      ConnectivityType: public
+      AvailabilityMode: regional
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway-AZ1
-
-  NatGatewayAZ2:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatGatewayAZ2EIP.AllocationId
-      SubnetId: !Ref PublicSubnet2
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-NatGateway-AZ2
-
-
+          Value: !Sub ${EnvironmentName}-RegionalNAT
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -225,30 +197,30 @@ Resources:
   DefaultPrivateRouteAZ1:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTableA1    # BUG 2 FIX: was !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA1
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGatewayAZ1
+      NatGatewayId: !Ref RegionalNatGateway
 
   DefaultPrivateRouteAZ2:
     Type: AWS::EC2::Route
     Properties:
-      RouteTableId: !Ref PrivateRouteTableA2    # BUG 2 FIX: was !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA2
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGatewayAZ2
+      NatGatewayId: !Ref RegionalNatGateway
 
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTableA1    # BUG 3 FIX: was !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA1
 
   PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
-      RouteTableId: !Ref PrivateRouteTableA2    # BUG 3 FIX: was !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTableA2
 
-  # ── Security Groups ────────────────────────────────────────────────────────
+
 
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -284,7 +256,6 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-SG
 
-  # ── Application Load Balancer ──────────────────────────────────────────────
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -311,7 +282,7 @@ Resources:
       TargetType: instance
       HealthCheckProtocol: HTTP
       HealthCheckPath: /
-      HealthCheckIntervalSeconds: 30
+      HealthCheckIntervalSeconds: 10
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
@@ -329,7 +300,6 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ALBTargetGroup
 
-  # ── IAM ────────────────────────────────────────────────────────────────────
 
   EC2InstanceRole:
     Type: AWS::IAM::Role
@@ -355,7 +325,6 @@ Resources:
       Roles:
         - !Ref EC2InstanceRole
 
-  # ── Launch Template & ASG ──────────────────────────────────────────────────
 
   WebServerLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -601,15 +570,13 @@ Resources:
               - Key: Environment
                 Value: !Ref EnvironmentName
 
-  # BUG 4 FIX: DependsOn referenced "DefaultPrivateRoute" and "NatGateway"
-  # which are not defined in this template. Updated to the correct logical IDs.
+
   WebServerASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn:
-      - DefaultPrivateRouteAZ1    # BUG 4 FIX: was DefaultPrivateRoute
-      - DefaultPrivateRouteAZ2    # BUG 4 FIX: was missing
-      - NatGatewayAZ1             # BUG 4 FIX: was NatGateway
-      - NatGatewayAZ2             # BUG 4 FIX: was missing
+      - DefaultPrivateRouteAZ1
+      - DefaultPrivateRouteAZ2
+      - RegionalNatGateway
     Properties:
       AutoScalingGroupName: !Sub ${EnvironmentName}-ASG
       MinSize: !Ref ASGMinSize
@@ -624,7 +591,7 @@ Resources:
       TargetGroupARNs:
         - !Ref ALBTargetGroup
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 120
+      HealthCheckGracePeriod: 20
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-WebServer
@@ -680,16 +647,3 @@ Outputs:
     Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
     Export:
       Name: !Sub ${EnvironmentName}-PrivateSubnetIds
-
-
-  NatGatewayAZ1IP:
-    Description: Elastic IP of the NAT Gateway in AZ-1
-    Value: !Ref NatGatewayAZ1EIP
-    Export:
-      Name: !Sub ${EnvironmentName}-NatGatewayEIP-AZ1
-
-  NatGatewayAZ2IP:
-    Description: Elastic IP of the NAT Gateway in AZ-2
-    Value: !Ref NatGatewayAZ2EIP
-    Export:
-      Name: !Sub ${EnvironmentName}-NatGatewayEIP-AZ2
